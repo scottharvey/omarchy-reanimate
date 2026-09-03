@@ -7,12 +7,12 @@ vicinity. The same windows, on the same workspaces, in the same splits, at the
 same ratios, with your terminals still in the directories you left them in.
 
 ```
-        before it died                 after it got back up
-    ┌──────────┬──────────┐          ┌──────────┬──────────┐
-    │          │  chrome  │          │          │  chrome  │
-    │   foot   ├──────────┤    ⚰️ →   │   foot   ├──────────┤
-    │          │  editor  │          │          │  editor  │
-    └──────────┴──────────┘          └──────────┴──────────┘
+        before it died                   after it got back up
+    ┌──────────┬──────────┐             ┌──────────┬──────────┐
+    │          │  chrome  │             │          │  chrome  │
+    │   foot   ├──────────┤     -->     │   foot   ├──────────┤
+    │          │  editor  │             │          │  editor  │
+    └──────────┴──────────┘             └──────────┴──────────┘
 ```
 
 ## What claws its way back
