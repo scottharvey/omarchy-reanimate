@@ -56,6 +56,23 @@ ask your browser to die politely. That is the difference between it coming
 back with your tabs and coming back with a blank New Tab. Merging the snippet
 edits your menu config, so it is deliberately left to you.
 
+## Install prompt
+
+Hand this to a coding agent and it will do all of it, including the menu step:
+
+```text
+Install the Reanimate plugin on this Omarchy machine:
+
+1. omarchy plugin add https://github.com/scottharvey/omarchy-reanimate.git --enable
+2. Run install.sh from the installed plugin directory. `omarchy plugin add` does
+   not run it, and without it there is no snapshot timer and no boot hook.
+3. Merge extensions/omarchy-menu-snippet.jsonc into
+   ~/.config/omarchy/extensions/omarchy-menu.jsonc, keeping any entries already
+   there and backing the file up first, then run: omarchy menu refresh
+4. Verify: omarchy-reanimate-save reports the windows it saved, and
+   `systemctl --user is-active omarchy-reanimate-save.timer` prints active.
+```
+
 ## Remove
 
 Putting it back in the ground:
