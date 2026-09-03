@@ -26,7 +26,7 @@ its default. A copyable starting point is in
 | `browser_classes` | chromium, chrome, brave, edge, helium | Window classes treated as the same browser. |
 | `park_workspace` | `special:reanimate` | Where browser windows wait before being moved into place. |
 
-Games and video players belong in `exclude_classes` — relaunching them after a
+Games and video players belong in `exclude_classes`. Relaunching them after a
 reboot is rarely what anyone wants.
 
 ## Where things live

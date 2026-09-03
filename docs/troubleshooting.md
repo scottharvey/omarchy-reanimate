@@ -73,7 +73,7 @@ restore otherwise refuses to replay it.
   second boot may have had nothing to restore.
 - Is the timer running? `systemctl --user status omarchy-reanimate-save.timer`
 - Did you install from the marketplace and skip `install.sh`? Then there is no
-  hook and no timer — see the README's Install section.
+  hook and no timer. See the README's Install section.
 
 ## My browser came back with blank tabs
 

@@ -3,7 +3,7 @@
 **Your Hyprland session dies every time you reboot. Reanimate digs it back up.**
 
 Not a shambling approximation with the right apps somewhere in the general
-vicinity — the same windows, on the same workspaces, in the same splits, at the
+vicinity. The same windows, on the same workspaces, in the same splits, at the
 same ratios, with your terminals still in the directories you left them in.
 
 ```
@@ -17,16 +17,16 @@ same ratios, with your terminals still in the directories you left them in.
 
 ## What claws its way back
 
-- **The tiling tree** — split structure, orientation and ratios, not merely
+- **The tiling tree**: split structure, orientation and ratios, not merely
   which workspace things landed on
 - Every window's launch command, exhumed from `/proc/<pid>/cmdline`
-- Terminal working directories — the shell's *real* cwd, not wherever the
+- Terminal working directories: the shell's *real* cwd, not wherever the
   terminal was first opened
 - Floating windows at their exact position and size; fullscreen, maximized and
   pinned states
 - **Every browser window with its actual tabs**, each on its own workspace
 - Web apps, relaunched individually instead of collapsed into one window
-- [herdr](https://herdr.dev) sessions — and the AI agents living in its panes
+- [herdr](https://herdr.dev) sessions, and the AI agents living in its panes
 - Which workspace was active on each monitor, and which window had focus
 
 Most session tools stop at "right app, roughly the right place", because
@@ -43,7 +43,7 @@ omarchy plugin add https://github.com/scottharvey/omarchy-reanimate.git --enable
 ```
 
 Both lines matter. `omarchy plugin add` does **not** run `install.sh`, so on
-its own it gives you the Quickshell service and nothing else — no periodic
+its own it gives you the Quickshell service and nothing else: no periodic
 snapshots, no menu entries. From a clone, just `./install.sh`.
 
 The installer adds a post-boot hook and a systemd user timer that snapshots
@@ -51,10 +51,10 @@ every 2 minutes.
 
 Then, recommended: merge `extensions/omarchy-menu-snippet.jsonc` into
 `~/.config/omarchy/extensions/omarchy-menu.jsonc` and run `omarchy menu
-refresh`, so Reboot and Shutdown take a fresh snapshot on the way down — and
-ask your browser to die politely, which is the difference between it coming
-back with your tabs and coming back with a blank New Tab. That step edits your
-menu config, so it is deliberately left to you.
+refresh`, so Reboot and Shutdown take a fresh snapshot on the way down, and
+ask your browser to die politely. That is the difference between it coming
+back with your tabs and coming back with a blank New Tab. Merging the snippet
+edits your menu config, so it is deliberately left to you.
 
 ## Remove
 
@@ -90,13 +90,13 @@ restore, so you can gate a test script on it.
 ## What stays dead
 
 This is best-effort relaunch, not necromancy. Processes are not frozen and
-resumed — only hibernation (`omarchy hibernation setup`) does that.
+resumed. Only hibernation (`omarchy hibernation setup`) does that.
 
 - **Apps reopen fresh.** Unsaved work is gone. Editors and browsers bring back
   their own state only if they are configured to.
 - **Terminals come back in the right directory with a fresh shell**, not your
   running program. Use a multiplexer if you need the session itself.
-- Window **groups** are recorded but not rebuilt — grouped windows sit out of
+- Window **groups** are recorded but not rebuilt. Grouped windows sit out of
   the layout reconstruction so they cannot corrupt the rest of the tree.
 - Only the `dwindle` layout gets tree reconstruction. Under anything else,
   windows still reach the right workspaces with correct floating geometry.
@@ -123,10 +123,10 @@ untested.
 
 ## Digging deeper
 
-- [How it works](docs/how-it-works.md) — layout tree reconstruction, browser
+- [How it works](docs/how-it-works.md): layout tree reconstruction, browser
   handling, how a terminal's contents are found, when the restore fires
-- [Configuration](docs/configuration.md) — every option, and the state files
-- [Troubleshooting](docs/troubleshooting.md) — the diff tool, reading the log,
+- [Configuration](docs/configuration.md): every option, and the state files
+- [Troubleshooting](docs/troubleshooting.md): the diff tool, reading the log,
   testing without rebooting
 
 ## License

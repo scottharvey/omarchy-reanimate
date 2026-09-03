@@ -8,8 +8,8 @@ to serialise. Reanimate infers the tree instead.
 The save records each window's rectangle. `infer_tree` looks for a straight
 line that cleanly partitions those rectangles into two groups, recurses into
 each side, and returns a binary tree of splits with the ratio at each node. If
-the rectangles do not form a clean binary partition — which happens with window
-groups, or after manual resizing that breaks the invariant — it gives up for
+the rectangles do not form a clean binary partition (which happens with window
+groups, or after manual resizing that breaks the invariant), it gives up for
 that workspace and says so in the log rather than guessing.
 
 Replaying it relies on one fact about dwindle: when it splits a leaf, the two
@@ -21,7 +21,7 @@ it. Windows are then re-inserted in their original creation order, taken from
 Hyprland's monotonically increasing `stableId`.
 
 Structure comes back first; proportions come second. A convergence pass resizes
-each tiled window toward its saved size, twice — each resize redistributes
+each tiled window toward its saved size, twice. Each resize redistributes
 space to a single sibling subtree, so two passes settle it.
 
 ## Finding what a terminal is hosting
@@ -34,13 +34,13 @@ So the save walks the window's descendants, depth-bounded, looking for
 something worth bringing back:
 
 - **herdr** wins over everything. The agents inside its panes are its
-  descendants too, but it is herdr that has to be relaunched — it rebuilds its
+  descendants too, but it is herdr that has to be relaunched. It rebuilds its
   own tabs and panes from its session file once it is up.
 - **claude** is recorded with its absolute path, because it is installed
   through mise and a restored terminal gets no login shell to put the shims on
   `PATH`. It comes back as `claude --continue`.
 
-The terminal is then relaunched hosting it — `foot herdr` rather than `foot`.
+The terminal is then relaunched hosting it: `foot herdr` rather than `foot`.
 A restored terminal's argv already carries that payload, so the save strips any
 existing copy before adding the current one; otherwise every snapshot would
 append another (`foot herdr herdr`).
@@ -58,7 +58,7 @@ Two things are easy to get wrong here:
   the first starts and the rest are rejected with *"agent name claude is
   already used"*.
 - `agent start` reports failure for an agent that came up fine and then stopped
-  at a prompt — which is exactly what `claude --continue` does on a large
+  at a prompt, which is exactly what `claude --continue` does on a large
   session, offering to resume from a summary. The exit status is therefore
   ignored; what herdr can see in the pane afterwards is what counts. A blocked
   agent is a success with a note, not a failure.
@@ -75,8 +75,8 @@ handled separately.
 **Ask it to die properly.** Chromium writes a complete session only on a
 graceful exit. Killed as the machine goes down it is marked as having crashed
 and comes back with a single window and stale tabs, no matter what "continue
-where you left off" is set to. So `omarchy-reanimate-save --quit-browsers` —
-which the Reboot and Shutdown menu entries use — records the layout first, then
+where you left off" is set to. So `omarchy-reanimate-save --quit-browsers`
+(which the Reboot and Shutdown menu entries use) records the layout first, then
 sends `SIGTERM` and waits for the browser to finish. Its own session restore
 then brings the windows back with the pages that were in them.
 
@@ -89,7 +89,7 @@ PWA with `StartupWMClass`); web apps seen running before
 config; and last, the URL decoded from the window class itself. Chromium does
 not restore `--app=` windows itself, so there is no risk of duplicates.
 
-**Plain browser windows** are relaunched through `/usr/bin/chromium` — the
+**Plain browser windows** are relaunched through `/usr/bin/chromium`, the
 wrapper Omarchy uses, not the raw binary `/proc` reports, which would give the
 window a different class. The browser is launched once and every window it
 opens is parked on a special workspace, then moved into place one at a time at
@@ -111,7 +111,7 @@ manifest format already has a slot for it.
 ## When the restore runs
 
 Only at boot. The manifest carries its save time and the restore refuses to
-replay anything saved since the machine booted — those windows are already
+replay anything saved since the machine booted. Those windows are already
 open, and replaying them would duplicate every one. This matters because the
 Omarchy shell re-runs plugin services whenever a plugin file changes or the
 shell restarts.
