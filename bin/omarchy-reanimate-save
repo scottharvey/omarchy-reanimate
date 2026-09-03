@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+
+# omarchy:summary=Save open windows, workspaces and tiling layout for restore on next boot
+# omarchy:args=[--quiet] [--print] [--quit-browsers]
+
+"""Snapshot the current Hyprland session.
+
+Records every window's launch command, workspace, geometry and state, plus the
+reconstructed dwindle tree for each workspace so the tiling can be replayed.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shlex
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import session_core as core  # noqa: E402
+
+
+def browser_command(argv: list[str]) -> str:
+    """Relaunch the browser the way Omarchy does, not the way /proc shows it.
+
+    /proc reports the resolved binary (/usr/lib/chromium/chromium), and running
+    that directly gives the window a different class than the /usr/bin wrapper
+    everything else on the system launches through. The saved flags are dropped
+    too: the wrapper re-applies them, and a stale --app= must not leak in.
+    """
+    command = core.default_browser_command()
+    if command:
+        return command
+    canonical = shutil.which(Path(argv[0]).name)
+    return shlex.quote(canonical or argv[0])
+
+
+def main() -> int:
+    os.umask(0o077)  # saved command lines can contain private paths
+    quiet = "--quiet" in sys.argv
+    to_stdout = "--print" in sys.argv
+    # Used by the reboot and shutdown menu entries: record the layout, then let
+    # the browser close itself down properly before the machine goes away.
+    shutting_down = "--quit-browsers" in sys.argv
+
+    core.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # A restore holds this lock while it works; snapshotting a half-rebuilt
+    # desktop would overwrite the manifest with garbage.
+    lock = core.LOCK_FILE.open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        core.log("save", "skipped, a restore is in progress")
+        if not quiet:
+            print("Skipped: a restore is in progress")
+        return 0
+
+    core.log("save", "started")
+    config = core.load_config()
+    class_res = core.compiled(config["exclude_classes"])
+    title_res = core.compiled(config["exclude_titles"])
+    browsers = set(config["browser_classes"])
+
+    clients = core.hyprctl_json("clients")
+    monitors = core.hyprctl_json("monitors")
+    active = core.hyprctl_json("activewindow") or {}
+    table = core.webapp_table(config)
+    learned = core.learned_load()
+    learned_before = dict(learned)
+
+    pid_webapp_count: dict[int, int] = {}
+    for client in clients:
+        if core.is_webapp(client.get("class", "")):
+            pid_webapp_count[client["pid"]] = pid_webapp_count.get(client["pid"], 0) + 1
+
+    kept = []
+    for client in clients:
+        workspace = client.get("workspace", {}).get("id", 0)
+        pid = client.get("pid", 0)
+        if workspace <= 0 or pid <= 0:  # special workspaces have negative ids
+            continue
+        if core.excluded(client, class_res, title_res):
+            continue
+        argv = core.proc_argv(pid)
+        if not argv:
+            continue
+        kept.append((client, argv))
+
+    # stableId increases monotonically with window creation, which is exactly
+    # the order dwindle used to build each workspace's tree.
+    kept.sort(key=lambda pair: core.stable_id(pair[0]))
+
+    workspaces: dict[int, dict] = {}
+    monitor_of = {m["id"]: m["name"] for m in monitors}
+    skipped_layouts = []
+    unresolved = []
+
+    for client, argv in kept:
+        klass = client.get("class", "")
+        workspace = client["workspace"]["id"]
+        bucket = workspaces.setdefault(
+            workspace,
+            {
+                "id": workspace,
+                "monitor": monitor_of.get(client.get("monitor"), ""),
+                "windows": [],
+            },
+        )
+
+        cwd = ""
+        if klass in core.TERMINAL_CLASSES:
+            cwd = core.shell_cwd(client["pid"])
+
+        source = ""
+        runs = ""
+        if core.is_webapp(klass):
+            kind = "webapp"
+            command, source = core.resolve_webapp(
+                klass, argv, pid_webapp_count.get(client["pid"], 0) > 1, table, learned
+            )
+            if not command:
+                unresolved.append(klass)
+                kind = "browser"
+                command = browser_command(argv)
+        elif core.is_browser(klass, browsers):
+            kind = "browser"
+            command = browser_command(argv)
+        else:
+            kind = "native"
+            # A terminal hosting herdr or a claude session has to come back
+            # hosting it, not as an empty shell.
+            payload = (
+                core.terminal_payload(client["pid"])
+                if klass in core.TERMINAL_CLASSES else []
+            )
+            if payload:
+                runs = Path(payload[0]).name
+            command = core.build_command(argv, klass, cwd, payload or None)
+
+        window = {
+            "idx": len(bucket["windows"]),
+            "class": klass,
+            "title": client.get("title", ""),
+            "kind": kind,
+            "cmd": command,
+            "cwd": cwd,
+            "at": client.get("at", [0, 0]),
+            "size": client.get("size", [0, 0]),
+            "floating": bool(client.get("floating")),
+            "fullscreen": int(client.get("fullscreen", 0)),
+            "pinned": bool(client.get("pinned")),
+            "grouped": bool(client.get("grouped")),
+            "stableId": core.stable_id(client),
+        }
+        if source:
+            window["resolved"] = source
+        if runs:
+            window["runs"] = runs
+        bucket["windows"].append(window)
+
+    if learned != learned_before:
+        core.learned_save(learned)
+
+    if not workspaces:
+        core.MANIFEST.unlink(missing_ok=True)
+        core.log("save", "no windows found")
+        if not quiet:
+            print("No windows to save")
+        return 0
+
+    tolerance = core.gaps() * 2 + 8
+    layout = core.current_layout()
+
+    for bucket in workspaces.values():
+        tiled = [w for w in bucket["windows"] if not w["floating"] and not w["grouped"]]
+        tree = None
+        if layout == "dwindle" and tiled:
+            tree = core.infer_tree(
+                [
+                    {
+                        "idx": w["idx"],
+                        "x": w["at"][0],
+                        "y": w["at"][1],
+                        "w": w["size"][0],
+                        "h": w["size"][1],
+                    }
+                    for w in tiled
+                ],
+                tolerance,
+            )
+        bucket["tree"] = tree
+        bucket["plan"] = core.insertion_plan(tree) if tree else []
+        if tiled and tree is None:
+            skipped_layouts.append(bucket["id"])
+
+    focused = {
+        "workspace": active.get("workspace", {}).get("id", 0),
+        "stableId": core.stable_id(active) if active else 0,
+    }
+
+    manifest = {
+        "version": core.SCHEMA_VERSION,
+        "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "layout": layout,
+        "tolerance": tolerance,
+        "monitors": [
+            {"name": m["name"], "activeWorkspace": m.get("activeWorkspace", {}).get("id", 0)}
+            for m in monitors
+        ],
+        "focused": focused,
+        "workspaces": [workspaces[k] for k in sorted(workspaces)],
+    }
+
+    # Agents live in herdr panes rather than in windows of their own, so they
+    # are recorded separately. Only agents running at this moment are saved --
+    # a pane the user left at a shell prompt should come back at one.
+    agents = [
+        {
+            "agent": a.get("agent", ""),
+            "name": a.get("name", ""),
+            "pane_id": a.get("pane_id", ""),
+            "cwd": a.get("cwd", ""),
+            "tab_id": a.get("tab_id", ""),
+            "workspace_id": a.get("workspace_id", ""),
+        }
+        for a in core.herdr_agents()
+        if a.get("agent") and a.get("pane_id")
+    ]
+    if agents:
+        manifest["agents"] = agents
+
+    if to_stdout:
+        print(json.dumps(manifest, indent=2))
+        return 0
+
+    core.MANIFEST.write_text(json.dumps(manifest, indent=2))
+
+    total = sum(len(b["windows"]) for b in workspaces.values())
+    notes = []
+    if skipped_layouts:
+        notes.append(f"layout not inferable on workspace(s) {skipped_layouts}")
+    if unresolved:
+        notes.append(f"web app(s) with no known URL, saved as plain browser windows: {unresolved}")
+    suffix = ("; " + "; ".join(notes)) if notes else ""
+    tally = f"{total} window(s) across {len(workspaces)} workspace(s)"
+    if agents:
+        tally += f" and {len(agents)} agent(s)"
+    core.log("save", f"saved {tally}{suffix}")
+
+    if shutting_down:
+        stopped = core.quit_browsers(
+            clients, browsers, config["browser_quit_timeout"]
+        )
+        if stopped:
+            core.log("save", f"asked {stopped} browser process(es) to quit")
+    if not quiet:
+        print(f"Saved {tally}")
+        for note in notes:
+            print(note)
+        if unresolved:
+            print(f"Add them to webapp_urls in {core.CONFIG_FILE} to fix this.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

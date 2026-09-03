@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+
+# omarchy:summary=Compare a saved session against the windows currently open
+# omarchy:args=[--manifest <path>] [--saved] [--json] [--quiet]
+
+"""Diff a saved session manifest against live windows.
+
+Made for debugging a restore: run it after a boot to see exactly which windows
+came back correctly, which drifted, and which never arrived. Exits non-zero
+when anything does not match, so it can gate a test script.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import session_core as core  # noqa: E402
+
+TOLERANCE = 2  # px; anything under this is a rounding artefact, not a defect
+BROWSERS = core.load_config()["browser_classes"]
+
+STATUS = {
+    "ok": ("ok      ", 0),
+    "moved": ("geometry", 1),
+    "class": ("class   ", 1),
+    "missing": ("missing ", 1),
+    "extra": ("extra   ", 1),
+}
+
+
+def geometry(entry) -> tuple:
+    if "at" in entry and "size" in entry:
+        return tuple(entry["at"]), tuple(entry["size"])
+    return (0, 0), (0, 0)
+
+
+def drift(a, b) -> int:
+    (ax, ay), (aw, ah) = a
+    (bx, by), (bw, bh) = b
+    return max(abs(ax - bx), abs(ay - by), abs(aw - bw), abs(ah - bh))
+
+
+def describe(entry) -> str:
+    (x, y), (w, h) = geometry(entry)
+    return f"{w}x{h} @{x},{y}"
+
+
+def pair_windows(saved: list, live: list) -> list:
+    """Match saved windows to live ones without assuming they are in order.
+
+    Positional diffing reports a reordering as a huge geometry delta, which
+    buries the real problem. Matching by identity first keeps the output honest.
+    """
+    unmatched = list(live)
+    results = []
+
+    def take(predicate):
+        for candidate in unmatched:
+            if predicate(candidate):
+                unmatched.remove(candidate)
+                return candidate
+        return None
+
+    for window in saved:
+        want = geometry(window)
+        klass = window["class"]
+
+        found = take(lambda c: core.same_class(klass, c["class"], BROWSERS) and drift(geometry(c), want) <= TOLERANCE)
+        if found:
+            results.append(("ok", window, found))
+            continue
+
+        found = take(lambda c: core.same_class(klass, c["class"], BROWSERS))
+        if found:
+            results.append(("moved", window, found))
+            continue
+
+        found = take(lambda c: drift(geometry(c), want) <= TOLERANCE)
+        if found:
+            results.append(("class", window, found))
+            continue
+
+        results.append(("missing", window, None))
+
+    for leftover in unmatched:
+        results.append(("extra", None, leftover))
+    return results
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--manifest", type=Path, help="manifest file to compare against")
+    parser.add_argument("--saved", action="store_true",
+                        help="use session.json instead of the consumed .restored file")
+    parser.add_argument("--after", action="store_true",
+                        help="compare against the snapshot taken right after the last restore, "
+                             "rather than the windows open now")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--quiet", action="store_true", help="only print the summary")
+    args = parser.parse_args()
+
+    used = core.MANIFEST.with_suffix(".json.restored")
+    path = args.manifest or (core.MANIFEST if args.saved else (used if used.exists() else core.MANIFEST))
+    if not path.exists():
+        print(f"No manifest at {path}", file=sys.stderr)
+        return 2
+
+    manifest = json.loads(path.read_text())
+
+    if args.after:
+        if not core.AFTER_FILE.exists():
+            print(f"No post-restore snapshot at {core.AFTER_FILE}", file=sys.stderr)
+            return 2
+        capture = json.loads(core.AFTER_FILE.read_text())
+        live = capture["clients"]
+        source = f"snapshot taken {capture['captured_at'].replace('T', ' ')}"
+    else:
+        live = core.hyprctl_json("clients")
+        source = "windows open now"
+
+    report = []
+    counts = {key: 0 for key in STATUS}
+
+    for bucket in manifest["workspaces"]:
+        workspace = bucket["id"]
+        here = sorted(
+            (c for c in live if c.get("workspace", {}).get("id") == workspace),
+            key=core.stable_id,
+        )
+        rows = pair_windows(bucket["windows"], here)
+        for status, want, got in rows:
+            counts[status] += 1
+        report.append({"workspace": workspace, "saved": len(bucket["windows"]),
+                       "live": len(here), "rows": rows})
+
+    # Windows that came back on the wrong workspace entirely.
+    saved_workspaces = {b["id"] for b in manifest["workspaces"]}
+    strays = [c for c in live if c.get("workspace", {}).get("id") not in saved_workspaces
+              and c.get("workspace", {}).get("id", 0) > 0]
+
+    if args.json:
+        print(json.dumps({
+            "manifest": str(path),
+            "saved_at": manifest["saved_at"],
+            "counts": counts,
+            "strays": [{"class": c["class"], "workspace": c["workspace"]["id"]} for c in strays],
+            "workspaces": [
+                {"workspace": r["workspace"], "saved": r["saved"], "live": r["live"],
+                 "rows": [{"status": s,
+                           "want": {"class": w["class"], "at": w["at"], "size": w["size"]} if w else None,
+                           "got": {"class": g["class"], "at": g["at"], "size": g["size"]} if g else None}
+                          for s, w, g in r["rows"]]}
+                for r in report],
+        }, indent=2))
+        return 0 if sum(counts[k] for k in counts if k != "ok") == 0 else 1
+
+    print(f"{path.name}  (saved {manifest['saved_at'].replace('T', ' ')[:19]})")
+    print(f"compared against {source}\n")
+
+    if not args.quiet:
+        for entry in report:
+            bad = sum(1 for s, _, _ in entry["rows"] if s != "ok")
+            mark = "" if bad == 0 else f"   {bad} problem(s)"
+            print(f"workspace {entry['workspace']}   saved {entry['saved']} · live {entry['live']}{mark}")
+            for status, want, got in entry["rows"]:
+                label = STATUS[status][0]
+                if status == "ok":
+                    print(f"  {label} {want['class'][:28]:28} {describe(want)}")
+                elif status == "moved":
+                    print(f"  {label} {want['class'][:28]:28} {describe(want)}")
+                    print(f"           {'':28} now {describe(got)}   off by {drift(geometry(want), geometry(got))}px")
+                elif status == "class":
+                    print(f"  {label} {want['class'][:28]:28} -> {got['class']}")
+                    print(f"           {'':28} geometry matched, class changed on relaunch")
+                elif status == "missing":
+                    print(f"  {label} {want['class'][:28]:28} {describe(want)}   never came back")
+                else:
+                    print(f"  {label} {got['class'][:28]:28} {describe(got)}   not in the manifest")
+            print()
+
+    if strays:
+        print("on workspaces that were never saved:")
+        for c in strays:
+            print(f"  {c['class'][:28]:28} on workspace {c['workspace']['id']}")
+        print()
+
+    problems = sum(counts[k] for k in counts if k != "ok")
+    summary = ", ".join(f"{counts[k]} {k}" for k in ("ok", "moved", "class", "missing", "extra") if counts[k])
+    print(f"{summary}")
+    print("perfect restore" if problems == 0 else f"{problems} window(s) did not match")
+    return 0 if problems == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

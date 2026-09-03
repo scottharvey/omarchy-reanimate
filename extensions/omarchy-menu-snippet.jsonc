@@ -1,0 +1,11 @@
+{
+  // Merge these into ~/.config/omarchy/extensions/omarchy-menu.jsonc, then run:
+  //   omarchy menu refresh
+  //
+  // "Save Session" adds a manual save row to the System menu. The reboot and
+  // shutdown overrides snapshot the session first; the ";" join means a failed
+  // save can never block the power action.
+  "system.session-save": {"icon":"󰆓","label":"Save Session","description":"Save windows, workspaces and tiling for the next boot","action":"~/.config/omarchy/plugins/io.github.scottharvey.reanimate/bin/omarchy-reanimate-save --quiet && notify-send 'Session saved' 'Windows and layout will be restored on next boot'"},
+  "system.reboot": {"icon":"󰜉","label":"Reboot","action":"~/.config/omarchy/plugins/io.github.scottharvey.reanimate/bin/omarchy-reanimate-save --quiet --quit-browsers; omarchy-system-reboot"},
+  "system.shutdown": {"icon":"󰐥","label":"Shutdown","action":"~/.config/omarchy/plugins/io.github.scottharvey.reanimate/bin/omarchy-reanimate-save --quiet --quit-browsers; omarchy-system-shutdown"}
+}

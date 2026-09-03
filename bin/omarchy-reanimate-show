@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+
+# omarchy:summary=Show what the saved session currently contains
+# omarchy:args=[--json]
+
+"""Print the saved session manifest in a readable form."""
+
+from __future__ import annotations
+
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import session_core as core  # noqa: E402
+
+KIND_MARK = {"native": " ", "browser": "B", "webapp": "W"}
+
+
+def ago(stamp: str) -> str:
+    try:
+        saved = datetime.fromisoformat(stamp)
+    except ValueError:
+        return "unknown age"
+    seconds = (datetime.now().astimezone() - saved).total_seconds()
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h ago"
+    return f"{int(seconds / 86400)}d ago"
+
+
+def flags(window: dict) -> str:
+    marks = []
+    if window["floating"]:
+        marks.append("floating")
+    if window["fullscreen"] == 2:
+        marks.append("fullscreen")
+    elif window["fullscreen"] == 1:
+        marks.append("maximized")
+    if window["pinned"]:
+        marks.append("pinned")
+    if window["grouped"]:
+        marks.append("grouped")
+    return "  " + ", ".join(marks) if marks else ""
+
+
+def draw_tree(node, windows, prefix="", is_last=True, out=None):
+    """Render the saved split structure as an indented tree."""
+    connector = "└─ " if is_last else "├─ "
+    if node["type"] == "leaf":
+        window = windows[node["idx"]]
+        out.append(f"{prefix}{connector}[{node['idx']}] {window['class']}")
+        return
+    orientation = "side by side" if node["axis"] == "v" else "stacked"
+    percent = round(node["ratio"] * 100)
+    out.append(f"{prefix}{connector}{orientation} {percent}/{100 - percent}")
+    child_prefix = prefix + ("   " if is_last else "│  ")
+    draw_tree(node["near"], windows, child_prefix, False, out)
+    draw_tree(node["far"], windows, child_prefix, True, out)
+
+
+def main() -> int:
+    pending = core.MANIFEST
+    used = core.MANIFEST.with_suffix(".json.restored")
+
+    path, note = None, ""
+    if pending.exists():
+        path = pending
+    elif used.exists():
+        path, note = used, "  (already used by the last restore)"
+    else:
+        print("Nothing saved yet. Run: omarchy-reanimate-save")
+        return 1
+
+    if "--json" in sys.argv:
+        print(path.read_text())
+        return 0
+
+    manifest = json.loads(path.read_text())
+    windows = [w for b in manifest["workspaces"] for w in b["windows"]]
+    saved = manifest["saved_at"]
+
+    print(
+        f"Saved {ago(saved)}  ({saved.replace('T', ' ')[:19]}){note}\n"
+        f"{manifest['layout']} layout · {len(windows)} windows · "
+        f"{len(manifest['workspaces'])} workspaces"
+    )
+
+    for bucket in manifest["workspaces"]:
+        monitor = f" on {bucket['monitor']}" if bucket["monitor"] else ""
+        print(f"\nworkspace {bucket['id']}{monitor}")
+        for window in bucket["windows"]:
+            mark = KIND_MARK.get(window["kind"], " ")
+            title = window["title"][:46]
+            print(f"  {mark} [{window['idx']}] {window['class'][:26]:26} {title}")
+            if window["kind"] == "webapp":
+                print(f"       {window['cmd']}  (via {window.get('resolved', '?')})")
+            w, h = window["size"]
+            x, y = window["at"]
+            print(f"       {w}x{h} at {x},{y}{flags(window)}")
+            if window["cwd"]:
+                print(f"       cwd {window['cwd']}")
+        if bucket.get("tree"):
+            lines: list[str] = []
+            draw_tree(bucket["tree"], bucket["windows"], "  ", True, lines)
+            print("  layout")
+            for line in lines:
+                print(f"  {line}")
+        elif any(not w["floating"] for w in bucket["windows"]):
+            print("  layout could not be inferred; windows will use default placement")
+
+    focused = manifest.get("focused", {})
+    if focused.get("workspace"):
+        print(f"\nfocus was on workspace {focused['workspace']}")
+    print("\nB = browser window   W = web app")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

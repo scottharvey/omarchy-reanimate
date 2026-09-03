@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.scottharvey.reanimate",
+  "name": "Reanimate",
+  "version": "2.2.0",
+  "author": "Scott Harvey",
+  "description": "Save every window, workspace and tiling split before reboot and rebuild the exact layout on the next boot",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

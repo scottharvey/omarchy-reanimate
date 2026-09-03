@@ -1,0 +1,6 @@
+[Unit]
+Description=Snapshot the Hyprland session for restore on next boot
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/omarchy/plugins/io.github.scottharvey.reanimate/bin/omarchy-reanimate-save --quiet

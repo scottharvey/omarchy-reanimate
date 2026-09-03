@@ -1,0 +1,15 @@
+{
+  "exclude_classes": [
+    "^walker$",
+    "^gamescope$",
+    "^steam_app_\\d+$",
+    "^xwaylandvideobridge$",
+    "^mpv$",
+    "^org\\.prismlauncher\\.PrismLauncher$"
+  ],
+  "exclude_titles": [],
+  "restore_layout": true,
+  "restore_geometry": true,
+  "map_timeout": 20.0,
+  "chromium_settle": 6.0
+}

@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+
+# omarchy:summary=Relaunch saved windows and rebuild each workspace's tiling layout
+# omarchy:args=[--dry-run] [--keep] [--force]
+
+"""Replay a session saved by omarchy-reanimate-save.
+
+Windows are re-inserted one at a time, in their original creation order, with
+an explicit preselect direction before each insert. That reproduces the dwindle
+tree rather than merely putting the right apps on the right workspaces.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import session_core as core  # noqa: E402
+
+DRY_RUN = "--dry-run" in sys.argv
+KEEP = "--keep" in sys.argv
+# Restore a manifest saved during this boot anyway (testing only).
+FORCE = "--force" in sys.argv
+
+
+def say(message: str) -> None:
+    if DRY_RUN:
+        print(message)
+    else:
+        core.log("restore", message)
+
+
+def new_windows(before: set[str]) -> list[dict]:
+    return [c for c in core.hyprctl_json("clients") if c["address"] not in before]
+
+
+def wait_for_window(before: set[str], want_class: str, config: dict) -> str:
+    """Block until a new window maps, preferring one of the expected class.
+
+    Splash screens and helper windows can appear first, so an unexpected class
+    only wins after a short grace period with nothing better -- and even then
+    only if it is still around by the time we commit to it.
+    """
+    browsers = config["browser_classes"]
+    deadline = time.monotonic() + config["map_timeout"]
+    fallback = ""
+    while time.monotonic() < deadline:
+        time.sleep(config["poll_interval"])
+        fresh = new_windows(before)
+        for client in fresh:
+            if core.same_class(want_class, client.get("class", ""), browsers) or \
+                    core.same_class(want_class, client.get("initialClass", ""), browsers):
+                return client["address"]
+        if fresh and not fallback:
+            fallback = fresh[0]["address"]
+            deadline = min(deadline, time.monotonic() + 1.5)
+    if fallback and fallback not in core.addresses():
+        fresh = new_windows(before)
+        fallback = fresh[-1]["address"] if fresh else ""
+    return fallback
+
+
+def settle_browser(before: set[str], config: dict) -> list[str]:
+    """Wait for Chromium's own session restore to finish spawning windows.
+
+    On a cold boot the first window can take a long time; after that the rest
+    arrive in a burst. So: wait for the first, then wait for quiet.
+    """
+    browsers = config["browser_classes"]
+    started = time.monotonic()
+    first_deadline = started + config["browser_first_window_timeout"]
+    quiet_for = config["chromium_settle"]
+    seen: list[str] = []
+    last_change = None
+
+    while True:
+        time.sleep(0.2)
+        windows = sorted(
+            (c for c in new_windows(before) if c.get("class") in browsers),
+            key=core.stable_id,
+        )
+        current = [c["address"] for c in windows]
+        now = time.monotonic()
+        if current != seen:
+            seen, last_change = current, now
+        if not seen:
+            if now > first_deadline:
+                break
+            continue
+        if now - last_change >= quiet_for or now - started > 90:
+            break
+    return seen
+
+
+def park_browsers(manifest: dict, config: dict) -> list[str]:
+    """Launch the browser once and park every window it opens.
+
+    Parking matters for layout fidelity: Chromium restores all of its windows
+    at once, in its own order, but each one has to enter its workspace at its
+    original position in the insertion sequence. Holding them on a special
+    workspace lets the replay move them in one at a time.
+    """
+    slots = [w for ws in manifest["workspaces"] for w in ws["windows"] if w["kind"] == "browser"]
+    if not slots:
+        return []
+
+    park = config["park_workspace"]
+    if DRY_RUN:
+        say(f"launch {slots[0]['cmd']} once, park {len(slots)} window(s) on {park}")
+        return ["<parked>"] * len(slots)
+
+    before = core.addresses()
+    core.exec_cmd("", slots[0]["cmd"])
+    found = settle_browser(before, config)
+    say(f"browser restored {len(found)} window(s), {len(slots)} slot(s) needed")
+
+    for address in found:
+        core.move_to_workspace(address, park, follow=False)
+
+    # Chromium may remember fewer windows than we saved; top up the difference.
+    while len(found) < len(slots):
+        before = core.addresses()
+        core.exec_cmd("", f"{slots[len(found)]['cmd']} --new-window")
+        address = wait_for_window(before, slots[len(found)]["class"], config)
+        if not address:
+            say("timed out waiting for an extra browser window")
+            break
+        core.move_to_workspace(address, park, follow=False)
+        found.append(address)
+
+    return found
+
+
+def place(window: dict, workspace: int, parked: list[str], config: dict) -> str:
+    """Put one window into the current workspace at the current insert point."""
+    if window["kind"] == "browser" and parked:
+        address = parked.pop(0)
+        if DRY_RUN:
+            say(f"  move parked browser window -> workspace {workspace}")
+            return address
+        core.move_to_workspace(address, workspace)
+        return address
+
+    command = window["cmd"]
+    if not command:
+        say(f"  no launch command for {window['class']}, skipped")
+        return ""
+    if window["kind"] == "browser":
+        command += " --new-window"
+
+    rules = f"workspace {workspace}"
+    if window["floating"]:
+        rules += "; float"
+    if DRY_RUN:
+        say(f"  [{rules}] {command}")
+        return "<launched>"
+
+    before = core.addresses()
+    if not core.exec_cmd(rules, command):
+        say(f"  failed to spawn {window['class']}")
+        return ""
+    address = wait_for_window(before, window["class"], config)
+    if not address:
+        say(f"  timed out waiting for {window['class']}")
+    time.sleep(config["settle_delay"])
+    return address
+
+
+def restore_workspace(bucket: dict, parked: list[str], config: dict) -> dict[int, str]:
+    workspace = bucket["id"]
+    say(f"workspace {workspace}: {len(bucket['windows'])} window(s)")
+    if not DRY_RUN:
+        core.focus_workspace(workspace)
+
+    steps = {s["idx"]: s for s in bucket.get("plan", [])}
+    use_layout = config["restore_layout"] and bucket.get("tree") is not None
+    addresses: dict[int, str] = {}
+
+    for window in bucket["windows"]:
+        if window["floating"]:
+            continue
+        step = steps.get(window["idx"])
+        if use_layout and step and addresses.get(step["parent"]):
+            if DRY_RUN:
+                say(f"  split {step['parent']} towards {step['direction']}")
+            else:
+                core.focus_window(addresses[step["parent"]])
+                core.preselect(step["direction"])
+        address = place(window, workspace, parked, config)
+        if address:
+            addresses[window["idx"]] = address
+
+    # Floating windows sit outside the tree, so they go last and get their
+    # exact saved geometry rather than a reconstructed one.
+    for window in bucket["windows"]:
+        if not window["floating"]:
+            continue
+        address = place(window, workspace, parked, config)
+        if not address or DRY_RUN:
+            continue
+        addresses[window["idx"]] = address
+        x, y = window["at"]
+        w, h = window["size"]
+        core.place_floating(address, x, y, w, h)
+
+    return addresses
+
+
+def converge(bucket: dict, addresses: dict[int, str]) -> None:
+    """Nudge split ratios until the tiled windows match their saved sizes.
+
+    Rebuilding the tree gets the structure right; this gets the proportions
+    right. Two passes is enough because each resize redistributes space to a
+    single sibling subtree.
+    """
+    tiled = [w for w in bucket["windows"] if not w["floating"] and addresses.get(w["idx"])]
+    for _ in range(2):
+        for window in tiled:
+            w, h = window["size"]
+            core.resize_exact(addresses[window["idx"]], w, h)
+
+
+def apply_states(bucket: dict, addresses: dict[int, str]) -> None:
+    for window in bucket["windows"]:
+        address = addresses.get(window["idx"])
+        if not address:
+            continue
+        if window["fullscreen"]:
+            mode = "fullscreen" if window["fullscreen"] == 2 else "maximized"
+            core.set_fullscreen(address, mode)
+        if window["pinned"]:
+            core.pin_window(address)
+
+
+def browser_home(manifest: dict) -> int:
+    """Where an unexpected browser window should go: the first saved one's workspace."""
+    for bucket in manifest["workspaces"]:
+        if any(w["kind"] == "browser" for w in bucket["windows"]):
+            return bucket["id"]
+    return manifest["workspaces"][-1]["id"]
+
+
+def sweep_park(manifest: dict, config: dict) -> None:
+    """Rehome any browser window Chromium opened beyond what we saved."""
+    park = config["park_workspace"].removeprefix("special:")
+    leftovers = [
+        c for c in core.hyprctl_json("clients")
+        if c.get("workspace", {}).get("name", "") in (park, f"special:{park}")
+    ]
+    if not leftovers:
+        return
+    home = browser_home(manifest)
+    for client in leftovers:
+        core.move_to_workspace(client["address"], home, follow=False)
+    say(f"moved {len(leftovers)} unclaimed browser window(s) to workspace {home}")
+
+
+def watch_late_browsers(manifest: dict, config: dict, known: set[str]) -> None:
+    """Catch browser windows that Chromium restores after we have finished.
+
+    They would otherwise land on whatever workspace happens to be focused and
+    push their way into a tree that was already exact.
+    """
+    seconds = config["late_browser_watch"]
+    if seconds <= 0:
+        return
+    browsers = config["browser_classes"]
+    home = browser_home(manifest)
+    deadline = time.monotonic() + seconds
+    moved = 0
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        for client in core.hyprctl_json("clients"):
+            if client["address"] in known or client.get("class") not in browsers:
+                continue
+            known.add(client["address"])
+            core.move_to_workspace(client["address"], home, follow=False)
+            moved += 1
+    if moved:
+        say(f"{moved} late browser window(s) moved to workspace {home}")
+
+
+def restore_focus(manifest: dict, index: dict[int, str]) -> None:
+    for monitor in manifest.get("monitors", []):
+        if monitor.get("activeWorkspace"):
+            core.focus_monitor(monitor["name"])
+            core.focus_workspace(monitor["activeWorkspace"])
+    target = manifest.get("focused", {}).get("stableId", 0)
+    if target and index.get(target):
+        core.focus_window(index[target])
+
+
+def pick_pane(entry: dict, panes: list[dict], taken: set[str]) -> str:
+    """Where an agent should go back: its own pane, else one with its cwd.
+
+    herdr numbers panes deterministically from its own session file, so the
+    original id is nearly always still right. The cwd fallback covers a pane
+    that was closed or renumbered between the save and the restore.
+    """
+    free = [p for p in panes if p.get("pane_id") and p["pane_id"] not in taken]
+    for pane in free:
+        if pane["pane_id"] == entry.get("pane_id"):
+            return pane["pane_id"]
+    for pane in free:
+        if pane.get("cwd") and pane["cwd"] == entry.get("cwd"):
+            return pane["pane_id"]
+    return ""
+
+
+def unique_name(preferred: str, used: set[str]) -> str:
+    """An agent label herdr will accept: names have to be unique per session.
+
+    The saved label is normally free, because it was unique when it was saved.
+    The numbering is for the case where something else has already claimed it.
+    """
+    if preferred and preferred not in used:
+        return preferred
+    for suffix in range(2, 100):
+        candidate = f"{preferred}-{suffix}"
+        if candidate not in used:
+            return candidate
+    return f"{preferred}-{os.getpid()}"
+
+
+def restore_agents(manifest: dict, config: dict) -> None:
+    """Restart the agents that were running inside herdr panes.
+
+    herdr rebuilds its own tabs and panes when its window comes back, but every
+    one of them lands at a shell prompt: the agent processes are not herdr's to
+    restart. This puts them back where they were.
+    """
+    saved = manifest.get("agents") or []
+    if not saved:
+        return
+    if not shutil.which("herdr"):
+        say(f"agents: {len(saved)} saved but herdr is not installed")
+        return
+
+    say(f"agents: {len(saved)} to resume")
+
+    # herdr is restored as an ordinary window, so its server and its panes do
+    # not exist until that window has come up and attached to the session.
+    panes = core.herdr_panes()
+    if not DRY_RUN:
+        deadline = time.monotonic() + config["herdr_timeout"]
+        while not panes and time.monotonic() < deadline:
+            time.sleep(1.0)
+            panes = core.herdr_panes()
+        if panes:
+            # A pane that has not reached its shell prompt yet rejects the
+            # start outright, and a freshly restored one needs a moment.
+            time.sleep(config["herdr_settle"])
+    if not panes:
+        say("  no herdr panes appeared, agents not resumed")
+        return
+
+    live = core.herdr_agents()
+    taken = {a.get("pane_id") for a in live}
+    names = {a.get("name") for a in live if a.get("name")}
+    for entry in saved:
+        kind = entry.get("agent", "")
+        pane = pick_pane(entry, panes, taken)
+        if not pane:
+            say(f"  no free pane for {kind} in {entry.get('cwd', '')}")
+            continue
+        taken.add(pane)
+        # Only claude can pick its own conversation back up; anything else
+        # starts clean rather than being handed a flag it will not understand.
+        args = ["--continue"] if kind == "claude" else []
+        name = unique_name(entry.get("name") or kind, names)
+        names.add(name)
+        if DRY_RUN:
+            tail = (" -- " + " ".join(args)) if args else ""
+            say(f"  herdr agent start {name} --kind {kind} --pane {pane}{tail}")
+            continue
+
+        core.herdr_start_agent(name, kind, pane, args, config["herdr_agent_timeout"])
+        live = {a.get("pane_id"): a for a in core.herdr_agents()}
+        if pane not in live:
+            say(f"  failed to resume {kind} in pane {pane}")
+            continue
+        # `claude --continue` stops at a prompt asking whether to resume from a
+        # summary or in full, and herdr reports that as blocked. The
+        # conversation is loaded and waiting: a success, not a failure.
+        blocked = live[pane].get("agent_status") == "blocked"
+        say(f"  resumed {kind} in pane {pane}"
+            + (" (waiting at its resume prompt)" if blocked else ""))
+
+
+def main() -> int:
+    os.umask(0o077)
+    core.STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # The shell service and the post-boot hook can both fire around login, and
+    # the periodic save must not snapshot a half-rebuilt desktop.
+    lock = core.LOCK_FILE.open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 0
+
+    if not core.MANIFEST.exists():
+        return 0
+    manifest = json.loads(core.MANIFEST.read_text())
+    if manifest.get("version") != core.SCHEMA_VERSION:
+        say(f"manifest version {manifest.get('version')} not understood, ignoring")
+        return 1
+
+    if not FORCE and not core.saved_before_boot(manifest["saved_at"]):
+        # Saved since this boot: those windows are already open. Leave the
+        # manifest for the next boot; the periodic save keeps it fresh.
+        return 0
+
+    config = core.load_config()
+    total = sum(len(b["windows"]) for b in manifest["workspaces"])
+    say(f"started ({total} window(s), saved {manifest['saved_at']})")
+
+    parked = park_browsers(manifest, config)
+
+    by_stable_id: dict[int, str] = {}
+    for bucket in manifest["workspaces"]:
+        addresses = restore_workspace(bucket, parked, config)
+        if not DRY_RUN:
+            if config["restore_geometry"]:
+                converge(bucket, addresses)
+            apply_states(bucket, addresses)
+        for window in bucket["windows"]:
+            if addresses.get(window["idx"]):
+                by_stable_id[window["stableId"]] = addresses[window["idx"]]
+
+    if not DRY_RUN:
+        sweep_park(manifest, config)
+        restore_focus(manifest, by_stable_id)
+        # Capture the result now: by the time anyone debugs a bad restore the
+        # desktop has moved on, and a live comparison is worthless.
+        clients = core.hyprctl_json("clients")
+        core.AFTER_FILE.write_text(json.dumps({
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "manifest_saved_at": manifest["saved_at"],
+            "clients": clients,
+        }, indent=2))
+        if not KEEP:
+            core.MANIFEST.replace(core.MANIFEST.with_suffix(".json.restored"))
+        say("completed")
+        watch_late_browsers(manifest, config, {c["address"] for c in clients})
+
+    restore_agents(manifest, config)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
