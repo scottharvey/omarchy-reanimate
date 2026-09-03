@@ -151,6 +151,19 @@ untested.
 - [Troubleshooting](docs/troubleshooting.md): the diff tool, reading the log,
   testing without rebooting
 
+## Credit
+
+The idea, and the shape of the solution, come from
+[wbarakat/omarchy-session-restore](https://github.com/wbarakat/omarchy-session-restore):
+snapshot the windows before shutdown, replay them from a post-boot hook, and
+override Reboot and Shutdown in the Omarchy menu so a save always happens on
+the way down. Reanimate follows all three.
+
+It is an independent implementation and shares no code with it. Everything here
+is deliberately named and namespaced so the two can sit side by side without
+fighting over the same manifest, log, hook or commands. If you want something
+smaller and simpler, in bash, go and use that one.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
