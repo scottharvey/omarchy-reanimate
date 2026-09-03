@@ -1,5 +1,10 @@
 # Reanimate
 
+<p align="center">
+  <img src="preview.png" width="260"
+       alt="A tiling window layout drawn as a monitor, its panels stitched together with sutures and bolted at the sides, being struck by lightning">
+</p>
+
 **Your Hyprland session dies every time you reboot. Reanimate digs it back up.**
 
 Not a shambling approximation with the right apps somewhere in the general
